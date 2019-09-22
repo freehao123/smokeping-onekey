@@ -13,6 +13,7 @@ smokeping_ver="/opt/smokeping/onekeymanage/ver"
 smokeping_key="/opt/smokeping/onekeymanage/key"
 smokeping_name="/opt/smokeping/onekeymanage/name"
 smokeping_host="/opt/smokeping/onekeymanage/host"
+tcpping="/usr/bin/tcpping"
 
 #Check Root
 [ $(id -u) != "0" ] && { echo "${CFAILURE}Error: You must be root to run this script${CEND}"; exit 1; }
@@ -36,7 +37,7 @@ Install_Epel(){
 
 #安装依赖
 Install_Dependency(){
-	yum install rrdtool perl-rrdtool perl-core openssl-devel fping curl gcc-c++ wqy-zenhei-fonts.noarch -y
+	yum install rrdtool perl-rrdtool perl-core openssl-devel fping curl gcc-c++ make wqy-zenhei-fonts.noarch supervisor curl -y
 }
 
 #下载smokeping
@@ -92,6 +93,7 @@ Configure_Nginx(){
 #修改Nginx配置文件 Master
 Master_Configure_Nginx(){
 	wget -O /etc/nginx/conf.d/smokeping.conf https://raw.githubusercontent.com/ILLKX/smokeping-onekey/master/smokeping-master.conf
+	sed -i "s/local/$server_name/g" /etc/nginx/conf.d/smokeping.conf
 	rm -rf /etc/nginx/nginx.conf
 	wget -O /etc/nginx/nginx.conf https://raw.githubusercontent.com/ILLKX/smokeping-onekey/master/nginx.conf
 }
@@ -122,11 +124,25 @@ Slaves_Set_Secret(){
 	echo -e "${slaves_secret}" > /opt/smokeping/etc/smokeping_secrets.dist
 }
 
+#配置supervisor
+Configure_Supervisor(){
+	wget -O /etc/supervisord.d/spawnfcgi.ini https://raw.githubusercontent.com/ILLKX/smokeping-onekey/master/spawnfcgi.ini
+	supervisord -c /etc/supervisord.conf
+	systemctl enable supervisord.service
+	supervisorctl stop spawnfcgi
+}
+
+#同步时间
+Time_Synchronization(){
+	\cp -f /usr/share/zoneinfo/Asia/Shanghai /etc/localtime 2>/dev/null
+	date -s "$(curl -sk --head https://dash.cloudflare.com | grep ^Date: | sed 's/Date: //g')"
+}
+
 #启动Single服务
 Single_Run_SmokePing(){
 	cd /opt/smokeping/bin
 	./smokeping --config=/opt/smokeping/etc/config --logfile=smoke.log
-	spawn-fcgi -a 127.0.0.1 -p 9007 -P /var/run/smokeping-fastcgi.pid -u nginx -f /opt/smokeping/htdocs/smokeping.fcgi
+	supervisorctl reload
 	Change_Access
 }
 
@@ -134,7 +150,7 @@ Single_Run_SmokePing(){
 Master_Run_SmokePing(){
 	cd /opt/smokeping/bin
 	./smokeping --config=/opt/smokeping/etc/config --logfile=smoke.log
-	spawn-fcgi -a 127.0.0.1 -p 9007 -P /var/run/smokeping-fastcgi.pid -u nginx -f /opt/smokeping/htdocs/smokeping.fcgi
+	supervisorctl reload
 	Change_Access
 }
 
@@ -145,6 +161,9 @@ Slaves_Run_SmokePing(){
 }
 
 Single_Install(){
+	echo
+	kill -9 `ps -ef |grep "smokeping"|grep -v "grep"|grep -v "smokeping.sh"|grep -v "perl"|awk '{print $2}'|xargs` 2>/dev/null
+	rm -rf /opt/smokeping
 	Ask_Change_Source
 	Install_Dependency
 	Download_Source
@@ -155,6 +174,8 @@ Single_Install(){
 	Start_Nginx_Disable_Firewall
 	Change_Access
 	Disable_SELinux
+	Configure_Supervisor
+	Time_Synchronization
 	Delete_Files
 	mkdir /opt/smokeping/onekeymanage
 	echo "Single" > ${smokeping_ver}
@@ -166,6 +187,8 @@ Slaves_Install(){
 	read -p "请输入Master地址 : " server_name
 	read -p "请输入Slaves名称 : " slaves_name
 	read -p "请输入Slaves密钥 : " slaves_secret
+	kill -9 `ps -ef |grep "smokeping"|grep -v "grep"|grep -v "smokeping.sh"|grep -v "perl"|awk '{print $2}'|xargs` 2>/dev/null
+	rm -rf /opt/smokeping
 	Ask_Change_Source
 	Install_Dependency
 	Download_Source
@@ -173,6 +196,7 @@ Slaves_Install(){
 	Slaves_Set_Secret
 	Configure_SomkePing
 	Disable_SELinux
+	Time_Synchronization
 	Delete_Files
 	mkdir /opt/smokeping/onekeymanage
 	echo "Slaves" > ${smokeping_ver}
@@ -185,6 +209,8 @@ Slaves_Install(){
 Master_Install(){
 	echo
 	read -p "请输入Master地址 : " server_name
+	kill -9 `ps -ef |grep "smokeping"|grep -v "grep"|grep -v "smokeping.sh"|grep -v "perl"|awk '{print $2}'|xargs` 2>/dev/null
+	rm -rf /opt/smokeping
 	Ask_Change_Source
 	Install_Dependency
 	Download_Source
@@ -196,6 +222,8 @@ Master_Install(){
 	Start_Nginx_Disable_Firewall
 	Change_Access
 	Disable_SELinux
+	Configure_Supervisor
+	Time_Synchronization
 	Delete_Files
 	mkdir /opt/smokeping/onekeymanage
 	echo "Master" > ${smokeping_ver}
@@ -205,7 +233,7 @@ Master_Install(){
 #询问是否换源
 Ask_Change_Source(){
 	while :; do echo
-		echo -e "${Tip} 是否将系统源更换成阿里云国内源 [y/n]： "
+		echo -e "${Tip} 是否将系统源更换成阿里云源 (国内外均可用) [y/n]： "
 		read ifchangesource
 		if [[ ! $ifchangesource =~ ^[y,n]$ ]]; then
 			echo "输入错误! 请输入y或者n!"
@@ -221,6 +249,16 @@ Ask_Change_Source(){
 	yum install wget -y
 }
 
+Install_Tcpping(){
+	cd
+	yum install tcptraceroute -y
+	rm -rf /usr/bin/tcpping
+	wget https://raw.githubusercontent.com/ILLKX/smokeping-onekey/master/tcpping
+	chmod 777 tcpping
+	mv tcpping /usr/bin/
+	echo -e "${Info} 安装 tcpping 完成"
+}
+
 #卸载SmokePing
 Uninstall(){
 	while :; do echo		
@@ -233,9 +271,11 @@ Uninstall(){
 		fi
 	done
 	if [[ $um == "y" ]]; then
-		Get_PID
-		kill -9 $PID 2> /dev/null
+		kill -9 `ps -ef |grep "smokeping"|grep -v "grep"|grep -v "smokeping.sh"|grep -v "perl"|awk '{print $2}'|xargs` 2>/dev/null
 		rm -rf /opt/smokeping
+		rm -rf /usr/bin/tcpping
+		rm -rf /etc/supervisord.d/spawnfcgi.ini
+		supervisorctl reload
 		echo
 		echo -e "${Info} SmokePing 卸载完成!"
 		echo
@@ -260,7 +300,9 @@ echo && echo -e "  SmokePing 一键管理脚本
  ${Green_font_prefix} 6.${Font_color_suffix} 停止 SmokePing
  ${Green_font_prefix} 7.${Font_color_suffix} 重启 SmokePing
   ————————————
- ${Green_font_prefix} 8.${Font_color_suffix} 退出
+ ${Green_font_prefix} 8.${Font_color_suffix} 安装 Tcpping
+  ————————————
+ ${Green_font_prefix} 9.${Font_color_suffix} 退出
   ————————————" && echo
 if [[ -e ${smokeping_ver} ]]; then
 	Get_PID
@@ -288,7 +330,13 @@ else
 	echo -e "当前状态: ${Red_font_prefix}未安装${Font_color_suffix}"
 fi
 echo
-read -p "请输入数字 [1-8]:" num
+if [[ ! -e ${tcpping} ]]; then
+	echo -e "Tcpping状态: ${Red_font_prefix}未安装${Font_color_suffix}"
+else
+	echo -e "Tcpping状态: ${Green_font_prefix}已安装${Font_color_suffix}"
+fi
+echo
+read -p "请输入数字 [1-9]:" num
 
 case "$num" in
 	
@@ -304,9 +352,10 @@ case "$num" in
 			fi
 		done
 		if [[ $um == "y" ]]; then
-			Get_PID
-			kill -9 $PID 2> /dev/null
+			kill -9 `ps -ef |grep "smokeping"|grep -v "grep"|grep -v "smokeping.sh"|grep -v "perl"|awk '{print $2}'|xargs` 2>/dev/null
 			rm -rf /opt/smokeping
+			rm -rf /usr/bin/tcpping
+			supervisorctl stop spawnfcgi
 			echo
 			echo -e "${Info} Smokeping ${mode2} 卸载完成! 开始安装 Master端!"
 			echo
@@ -331,9 +380,10 @@ case "$num" in
 			fi
 		done
 		if [[ $um == "y" ]]; then
-			Get_PID
-			kill -9 $PID 2> /dev/null
+			kill -9 `ps -ef |grep "smokeping"|grep -v "grep"|grep -v "smokeping.sh"|grep -v "perl"|awk '{print $2}'|xargs` 2>/dev/null
 			rm -rf /opt/smokeping
+			rm -rf /usr/bin/tcpping
+			supervisorctl stop spawnfcgi
 			echo
 			echo -e "${Info} Smokeping ${mode2} 卸载完成! 开始安装 Slaves端!"
 			echo
@@ -358,9 +408,10 @@ case "$num" in
 			fi
 		done
 		if [[ $um == "y" ]]; then
-			Get_PID
-			kill -9 $PID 2> /dev/null
+			kill -9 `ps -ef |grep "smokeping"|grep -v "grep"|grep -v "smokeping.sh"|grep -v "perl"|awk '{print $2}'|xargs` 2>/dev/null
 			rm -rf /opt/smokeping
+			rm -rf /usr/bin/tcpping
+			supervisorctl stop spawnfcgi
 			echo
 			echo -e "${Info} Smokeping ${mode2} 卸载完成! 开始安装 单机版!"
 			echo
@@ -386,23 +437,48 @@ case "$num" in
 
 6)
 	[[ ! -e ${smokeping_ver} ]] && echo -e "${Error} Smokeping 没有安装，请检查!" && exit 1
-	Get_PID
-	kill -9 $PID 2> /dev/null
+	kill -9 `ps -ef |grep "smokeping"|grep -v "grep"|grep -v "smokeping.sh"|grep -v "perl"|awk '{print $2}'|xargs` 2>/dev/null
+	supervisorctl stop spawnfcgi
 ;;
 
 7)
 	[[ ! -e ${smokeping_ver} ]] && echo -e "${Error} Smokeping 没有安装，请检查!" && exit 1
-	Get_PID
-	kill -9 $PID 2> /dev/null
+	kill -9 `ps -ef |grep "smokeping"|grep -v "grep"|grep -v "smokeping.sh"|grep -v "perl"|awk '{print $2}'|xargs` 2>/dev/null
 	${mode}_Run_SmokePing
 ;;
 
 8)
+	if [[ -e ${tcpping} ]]; then
+		while :; do echo
+			echo -e "${Tip} 已经安装${Green_font_prefix} tcpping ${Font_color_suffix}，是否重新安装 [y/n]: "
+			read um
+			if [[ ! $um =~ ^[y,n]$ ]]; then
+				echo "输入错误! 请输入y或者n!"
+			else
+				break
+			fi
+		done
+		if [[ $um == "y" ]]; then
+			rm -rf /usr/bin/tcpping
+			echo
+			echo -e "${Info} tcpping 卸载完成! 开始安装 Tcpping!"
+			echo
+			sleep 5
+			Install_Tcpping
+			exit
+		else
+			exit
+		fi
+	fi
+	Install_Tcpping
+;;
+
+9)
 	exit
 ;;
 
 *)
-	echo "输入错误! 请输入正确的数字! [1-8]"
+	echo "输入错误! 请输入正确的数字! [1-9]"
 ;;
 
 esac
